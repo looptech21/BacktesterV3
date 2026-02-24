@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: backtester
+Version: 3.0.0
+Summary: Systematic backtesting with LEAN engine, parameter sweeps, and NiceGUI interface
+Requires-Python: >=3.12
+Requires-Dist: pandas>=2.2
+Requires-Dist: pyarrow>=18.0
+Requires-Dist: numpy>=1.26
+Requires-Dist: pydantic>=2.8
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: plotly<7,>=6.0
+Requires-Dist: nicegui<3,>=2.0
+Requires-Dist: jinja2>=3.1
+Provides-Extra: dev
+Requires-Dist: pytest>=8.2; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"

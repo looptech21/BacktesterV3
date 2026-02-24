@@ -1,0 +1,2 @@
+[console_scripts]
+backtester = backtester.__main__:main
