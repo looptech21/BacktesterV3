@@ -65,12 +65,23 @@ Set these values explicitly:
 - `data.rth_start`: `09:30`
 - `data.rth_end`: `16:00`
 - `execution.order_session_scope`: `rth_only` (default policy)
+- `setups.episodic_pivot.premarket_gate_source_mode`: `precomputed_preferred` (recommended)
 - `runner.mode`: `auto` for full pipeline smoke
 - `runner.mode`: `dotnet` only for convert-only smoke (LEAN stage is skipped in V3)
 - `data.lean_data_root`: dedicated path per source/timeframe
 
 Important:
 - Do not enable split adjustment in BacktesterV3 when using this dataset, otherwise you risk double-adjustment.
+
+### 4.1 EP Premarket Gate Source Modes
+
+Use `setups.episodic_pivot.premarket_gate_source_mode` to control EP confirmation source:
+
+- `precomputed_preferred` (default): use `features_premarket` first, fallback to runtime proxy only when precomputed row/fields are missing.
+- `require_precomputed`: never fallback; reject EP activation when precomputed row is missing/incomplete.
+- `proxy_only`: always use runtime proxy; ignore precomputed EP row for activation decisions.
+
+Recommendation for frozen dataset runs: keep `precomputed_preferred` unless you explicitly want strict fail-closed behavior (`require_precomputed`) or debugging parity (`proxy_only`).
 
 ## 5) Pre-Flight Checks
 
@@ -198,6 +209,7 @@ Expected stage statuses:
 
 Note:
 - `num_trades` may be `0` in smoke. This is acceptable for integration verification.
+- BacktesterV3 remaps `data.parquet_root` to a container-visible path automatically for LEAN (`/Lean/PreparedDataset/...`), so absolute host roots like `/mnt/...` are supported.
 
 ## 8) Expected Outputs and Success Criteria
 
@@ -270,6 +282,17 @@ This is not automatically a failure.
 - integration smoke validates data wiring and execution path
 - strategy/signal density can produce zero fills for short windows
 
+### 9.5 EP precomputed gate source not used when expected
+
+Symptoms:
+- `lean_runtime_debug.json` shows `ep_gate_precomputed_* = 0` while you expected precomputed usage.
+
+Checks:
+- verify `setups.episodic_pivot.premarket_gate_source_mode` is not `proxy_only`
+- verify the period actually generates EP setups (`setups_generated > 0`)
+- verify dataset has `features_premarket/symbol=<SYM>/year=<YYYY>.parquet` for your symbols/years
+- inspect `setup_trace.json` and filter `evidence.gate_source` to confirm source path (`precomputed` vs `proxy_fallback`)
+
 ## 10) Limitations and Caveats (Critical)
 
 1. Feed-scope behavior in converter:
@@ -325,6 +348,6 @@ Execution policy:
 - point `data.parquet_root` to a non-matching path
 - verify troubleshooting flow identifies root mismatch
 
-4. GUI caveat confirmation:
-- verify GUI source discovery does not fully cover symbol-year dataset layout
-- keep pipeline/manual config path as operational integration route
+4. GUI integration confirmation:
+- verify GUI source discovery and trade inspection resolve symbol-year roots correctly
+- verify manual pipeline config still matches GUI-selected roots/timeframe

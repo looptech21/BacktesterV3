@@ -21,6 +21,7 @@ def test_run_config_includes_split_adjustment_defaults(tmp_path: Path) -> None:
     assert config.execution.order_session_scope == "rth_only"
     assert config.data.split_adjustment_mode == "none"
     assert config.data.split_adjust_volume is True
+    assert config.setups.episodic_pivot.premarket_gate_source_mode == "precomputed_preferred"
     assert str(config.data.split_events_file).endswith("hf_defeatbeta_stock_split_events_2026-02-16.parquet")
 
 
@@ -40,6 +41,7 @@ def test_run_config_accepts_split_adjustment_overrides(tmp_path: Path) -> None:
                 "lean_feed_scope": "rth",
             },
             "execution": {"order_session_scope": "full"},
+            "setups": {"episodic_pivot": {"premarket_gate_source_mode": "proxy_only"}},
             "universe": {"mode": "custom_list", "tickers": ["TSLA"]},
             "output": {"dir": str(tmp_path / "outputs")},
         }
@@ -51,3 +53,4 @@ def test_run_config_accepts_split_adjustment_overrides(tmp_path: Path) -> None:
     assert config.data.lean_feed_scope == "rth"
     assert config.execution.order_session_scope == "full"
     assert config.data.split_events_file == split_events_file
+    assert config.setups.episodic_pivot.premarket_gate_source_mode == "proxy_only"

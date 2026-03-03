@@ -41,6 +41,33 @@ class CommonBreakoutParams:
     rule_version: str = ""
 
 
+def _safe_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    return parsed
+
+
+def _resolve_sma_value(
+    closes: pd.Series,
+    period: int,
+    precomputed: dict[str, float] | None,
+) -> tuple[float | None, str]:
+    key = f"sma_{int(period)}"
+    if precomputed:
+        raw = precomputed.get(key)
+        if raw is not None:
+            value = _safe_float(raw)
+            if value is not None:
+                return value, "precomputed"
+    if len(closes) < period:
+        return None, "missing"
+    return float(closes.tail(period).mean()), "rolling"
+
+
 class CommonBreakoutAdapter(SetupAdapter):
     """Baseline common breakout implementation."""
 
@@ -58,6 +85,7 @@ class CommonBreakoutAdapter(SetupAdapter):
 
         symbol = str(df["ticker"].iloc[-1]).upper()
         p = self.params
+        precomputed = ctx.precomputed_daily_indicators or None
         min_len = p.consolidation_max_days + 5
         if len(df) < min_len:
             return []
@@ -101,21 +129,31 @@ class CommonBreakoutAdapter(SetupAdapter):
                     continue
 
             # MA alignment: last close must be within tolerance of each specified MA
+            ma_alignment_source = "disabled"
             if p.require_ma_alignment:
                 ma_periods = p.ma_alignment_periods or [20, 50]
                 last_close = float(df["close"].iloc[-1])
                 ma_ok = True
+                precomputed_hits = 0
                 for ma_len in ma_periods:
-                    if len(df) < ma_len:
+                    ma_val, source = _resolve_sma_value(df["close"], int(ma_len), precomputed)
+                    if ma_val is None:
                         ma_ok = False
                         break
-                    ma_val = float(df["close"].tail(ma_len).mean())
+                    if source == "precomputed":
+                        precomputed_hits += 1
                     min_allowed = ma_val * (1.0 - p.ma_alignment_tolerance_pct / 100.0)
                     if last_close < min_allowed:
                         ma_ok = False
                         break
                 if not ma_ok:
                     continue
+                if precomputed_hits == len(ma_periods):
+                    ma_alignment_source = "precomputed"
+                elif precomputed_hits > 0:
+                    ma_alignment_source = "mixed"
+                else:
+                    ma_alignment_source = "rolling"
 
             # Volume contraction: consolidation avg volume must be lower than impulse avg volume
             if p.require_volume_contraction:
@@ -170,6 +208,7 @@ class CommonBreakoutAdapter(SetupAdapter):
                     "max_stop_multiple": p.max_stop_multiple,
                     "entry_ladder_minutes": p.entry_ladder_minutes or [1, 5, 60],
                     "stop_cap_mode": p.stop_cap_mode,
+                    "ma_alignment_source": ma_alignment_source,
                 },
             )
             break

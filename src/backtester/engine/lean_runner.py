@@ -84,11 +84,53 @@ def _normalize_algorithm_file(raw: str) -> str:
     return value or "QM_MVP.py"
 
 
+_TIMEFRAME_DIRS = {"1m", "5m", "15m", "1h", "1d"}
+
+
+def _resolve_host_path(path: Path, repo_root: Path) -> Path:
+    target = Path(path)
+    if not target.is_absolute():
+        target = (repo_root / target).resolve()
+    else:
+        target = target.resolve()
+    return target
+
+
+def _dataset_mount_for_parquet_root(parquet_root: Path, repo_root: Path) -> tuple[Path, str]:
+    host_root = _resolve_host_path(Path(parquet_root), repo_root)
+
+    if host_root.name in _TIMEFRAME_DIRS and host_root.parent.name == "bars":
+        dataset_root = host_root.parent.parent
+        return dataset_root, f"/Lean/PreparedDataset/bars/{host_root.name}"
+
+    if host_root.name == "bars":
+        dataset_root = host_root.parent
+        return dataset_root, "/Lean/PreparedDataset/bars"
+
+    dataset_root = host_root.parent
+    return dataset_root, f"/Lean/PreparedDataset/{host_root.name}"
+
+
+def _lean_runtime_config_payload(config: RunConfig, repo_root: Path) -> tuple[dict[str, Any], Path]:
+    dataset_mount_root, parquet_root_in_container = _dataset_mount_for_parquet_root(
+        Path(config.data.parquet_root),
+        repo_root,
+    )
+
+    payload = config.model_dump(mode="json")
+    data_payload = dict(payload.get("data") or {})
+    data_payload["parquet_root"] = parquet_root_in_container
+    payload["data"] = data_payload
+    return payload, dataset_mount_root
+
+
 def build_lean_config(
     config: RunConfig,
     run_dir: Path,
     experiment_id: str,
     repo_root: Path,
+    *,
+    config_json_payload: dict[str, Any] | None = None,
 ) -> Path:
     """Build a LEAN configuration JSON and write it to run_dir."""
     algorithm_file = _normalize_algorithm_file(config.runner.algorithm_file)
@@ -104,7 +146,7 @@ def build_lean_config(
             "start-date": str(config.period.start_date),
             "end-date": str(config.period.end_date),
             "tickers": ",".join(config.resolved_tickers()),
-            "config-json": json.dumps(config.model_dump(mode="json"), default=str),
+            "config-json": json.dumps(config_json_payload or config.model_dump(mode="json"), default=str),
         },
     }
     cfg_path = run_dir / "lean_config.json"
@@ -131,7 +173,14 @@ def run_lean_docker(
             error="Docker binary not found. Install Docker or use runner.mode=dotnet.",
         )
 
-    lean_cfg_path = build_lean_config(config, run_dir, experiment_id, repo_root)
+    lean_payload, prepared_dataset_root = _lean_runtime_config_payload(config, repo_root)
+    lean_cfg_path = build_lean_config(
+        config,
+        run_dir,
+        experiment_id,
+        repo_root,
+        config_json_payload=lean_payload,
+    )
     lean_data_root = Path(config.data.lean_data_root).resolve()
     lean_data_root.mkdir(parents=True, exist_ok=True)
 
@@ -142,6 +191,7 @@ def run_lean_docker(
         "-w", "/workspace",
         "-e", "PYTHONPATH=/workspace/src:/workspace",
         "-v", f"{repo_root.resolve()}:/workspace",
+        "-v", f"{prepared_dataset_root.resolve()}:/Lean/PreparedDataset",
         "-v", f"{lean_data_root}:/Lean/HostData",
         "-v", f"{run_dir.resolve()}:/Lean/Results",
         config.runner.docker_image,

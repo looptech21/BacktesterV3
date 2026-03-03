@@ -169,6 +169,7 @@ class EpisodicPivotConfig(BaseModel):
     min_opening_volume_ratio: float = 3.0
     opening_volume_window_minutes: int = 20
     ah_pm_mode: Literal["off", "proxy", "full"] = "off"
+    premarket_gate_source_mode: Literal["precomputed_preferred", "require_precomputed", "proxy_only"] = "precomputed_preferred"
     orh_window_minutes: int = 5
     entry_ladder_minutes: list[int] = Field(default_factory=lambda: [1, 5, 60])
     stop_mode: Literal["running_lod", "running_lod_at_entry", "dminus1_open", "dminus1_low"] = "running_lod"

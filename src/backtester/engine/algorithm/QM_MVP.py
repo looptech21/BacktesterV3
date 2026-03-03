@@ -251,7 +251,26 @@ class QM_MVP(QCAlgorithm):
             "entry_blocked_ep_gate": 0,
             "config_common_breakout_enabled": int(self.run_config.setups.common_breakout.enabled),
             "config_episodic_pivot_enabled": int(self.run_config.setups.episodic_pivot.enabled),
+            "precomputed_indicator_symbols_loaded": 0,
+            "precomputed_indicator_rows_loaded": 0,
+            "precomputed_indicator_hits": 0,
+            "precomputed_indicator_misses": 0,
+            "precomputed_indicator_load_errors": 0,
+            "precomputed_premarket_symbols_loaded": 0,
+            "precomputed_premarket_rows_loaded": 0,
+            "precomputed_premarket_hits": 0,
+            "precomputed_premarket_misses": 0,
+            "precomputed_premarket_load_errors": 0,
+            "ep_gate_precomputed_pass": 0,
+            "ep_gate_precomputed_fail": 0,
+            "ep_gate_proxy_fallback_pass": 0,
+            "ep_gate_proxy_fallback_fail": 0,
         }
+
+        self.precomputed_daily_indicators: dict[str, dict[date, dict[str, float]]] = {}
+        self.precomputed_premarket_features: dict[str, dict[date, dict[str, float]]] = {}
+        self._load_precomputed_daily_indicators()
+        self._load_precomputed_premarket_features()
 
         for ticker, symbol in self.symbol_map.items():
             self.Consolidate(symbol, Resolution.Daily, self._make_daily_handler(ticker))
@@ -305,6 +324,197 @@ class QM_MVP(QCAlgorithm):
 
     def _intent_delay(self) -> timedelta:
         return timedelta(minutes=max(1, int(self._bar_step_minutes)))
+
+    def _dataset_root_from_parquet_root(self) -> Path | None:
+        root = Path(self.run_config.data.parquet_root)
+        if root.name in {"1m", "5m", "15m", "1h", "1d"} and root.parent.name == "bars":
+            return root.parent.parent
+        if root.name == "bars":
+            return root.parent
+        return None
+
+    @staticmethod
+    def _year_range(start_year: int, end_year: int) -> list[int]:
+        if end_year < start_year:
+            return []
+        return list(range(int(start_year), int(end_year) + 1))
+
+    @staticmethod
+    def _normalize_indicator_payload(row: pd.Series) -> dict[str, float]:
+        payload: dict[str, float] = {}
+        for column, raw in row.items():
+            if column == "session_date":
+                continue
+            try:
+                value = float(raw)
+            except builtins.Exception:
+                continue
+            if pd.isna(value):
+                continue
+            payload[str(column)] = value
+        return payload
+
+    def _load_precomputed_daily_indicators(self) -> None:
+        self.precomputed_daily_indicators = {}
+        dataset_root = self._dataset_root_from_parquet_root()
+        if dataset_root is None:
+            return
+
+        indicators_root = dataset_root / "indicators_daily"
+        if not indicators_root.exists():
+            return
+
+        years = self._year_range(self.run_config.period.start_date.year, self.run_config.period.end_date.year)
+        rows_loaded = 0
+        for ticker in self.tickers:
+            symbol = str(ticker).upper()
+            symbol_dir = indicators_root / f"symbol={symbol}"
+            if not symbol_dir.exists():
+                continue
+
+            frames: list[pd.DataFrame] = []
+            for year in years:
+                file_path = symbol_dir / f"year={year}.parquet"
+                if not file_path.exists():
+                    continue
+                try:
+                    frame = pd.read_parquet(file_path)
+                except builtins.Exception:
+                    self.runtime_debug["precomputed_indicator_load_errors"] = (
+                        int(self.runtime_debug.get("precomputed_indicator_load_errors", 0)) + 1
+                    )
+                    continue
+                if frame.empty or "session_date" not in frame.columns:
+                    continue
+                frame = frame.copy()
+                frame["session_date"] = pd.to_datetime(frame["session_date"], errors="coerce").dt.date
+                frame = frame.dropna(subset=["session_date"])
+                if frame.empty:
+                    continue
+                frames.append(frame)
+
+            if not frames:
+                continue
+
+            merged = pd.concat(frames, ignore_index=True)
+            merged = merged.sort_values("session_date").drop_duplicates(subset=["session_date"], keep="last")
+            by_day: dict[date, dict[str, float]] = {}
+            for _, row in merged.iterrows():
+                session_day = row.get("session_date")
+                if session_day is None:
+                    continue
+                payload = self._normalize_indicator_payload(row)
+                if not payload:
+                    continue
+                by_day[session_day] = payload
+
+            if not by_day:
+                continue
+
+            self.precomputed_daily_indicators[symbol] = by_day
+            rows_loaded += len(by_day)
+
+        self.runtime_debug["precomputed_indicator_symbols_loaded"] = len(self.precomputed_daily_indicators)
+        self.runtime_debug["precomputed_indicator_rows_loaded"] = rows_loaded
+
+    def _precomputed_indicator_row(self, ticker: str, day: date) -> dict[str, float] | None:
+        symbol = str(ticker).upper()
+        by_day = self.precomputed_daily_indicators.get(symbol)
+        if not by_day:
+            self.runtime_debug["precomputed_indicator_misses"] = int(
+                self.runtime_debug.get("precomputed_indicator_misses", 0)
+            ) + 1
+            return None
+        payload = by_day.get(day)
+        if payload is None:
+            self.runtime_debug["precomputed_indicator_misses"] = int(
+                self.runtime_debug.get("precomputed_indicator_misses", 0)
+            ) + 1
+            return None
+        self.runtime_debug["precomputed_indicator_hits"] = int(self.runtime_debug.get("precomputed_indicator_hits", 0)) + 1
+        return payload
+
+    def _load_precomputed_premarket_features(self) -> None:
+        self.precomputed_premarket_features = {}
+        dataset_root = self._dataset_root_from_parquet_root()
+        if dataset_root is None:
+            return
+
+        features_root = dataset_root / "features_premarket"
+        if not features_root.exists():
+            return
+
+        years = self._year_range(self.run_config.period.start_date.year, self.run_config.period.end_date.year)
+        rows_loaded = 0
+        for ticker in self.tickers:
+            symbol = str(ticker).upper()
+            symbol_dir = features_root / f"symbol={symbol}"
+            if not symbol_dir.exists():
+                continue
+
+            frames: list[pd.DataFrame] = []
+            for year in years:
+                file_path = symbol_dir / f"year={year}.parquet"
+                if not file_path.exists():
+                    continue
+                try:
+                    frame = pd.read_parquet(file_path)
+                except builtins.Exception:
+                    self.runtime_debug["precomputed_premarket_load_errors"] = int(
+                        self.runtime_debug.get("precomputed_premarket_load_errors", 0)
+                    ) + 1
+                    continue
+                if frame.empty or "session_date" not in frame.columns:
+                    continue
+                frame = frame.copy()
+                frame["session_date"] = pd.to_datetime(frame["session_date"], errors="coerce").dt.date
+                frame = frame.dropna(subset=["session_date"])
+                if frame.empty:
+                    continue
+                frames.append(frame)
+
+            if not frames:
+                continue
+
+            merged = pd.concat(frames, ignore_index=True)
+            merged = merged.sort_values("session_date").drop_duplicates(subset=["session_date"], keep="last")
+            by_day: dict[date, dict[str, float]] = {}
+            for _, row in merged.iterrows():
+                session_day = row.get("session_date")
+                if session_day is None:
+                    continue
+                payload = self._normalize_indicator_payload(row)
+                if not payload:
+                    continue
+                by_day[session_day] = payload
+
+            if not by_day:
+                continue
+
+            self.precomputed_premarket_features[symbol] = by_day
+            rows_loaded += len(by_day)
+
+        self.runtime_debug["precomputed_premarket_symbols_loaded"] = len(self.precomputed_premarket_features)
+        self.runtime_debug["precomputed_premarket_rows_loaded"] = rows_loaded
+
+    def _precomputed_premarket_row(self, ticker: str, day: date) -> dict[str, float] | None:
+        symbol = str(ticker).upper()
+        by_day = self.precomputed_premarket_features.get(symbol)
+        if not by_day:
+            self.runtime_debug["precomputed_premarket_misses"] = int(
+                self.runtime_debug.get("precomputed_premarket_misses", 0)
+            ) + 1
+            return None
+        payload = by_day.get(day)
+        if payload is None:
+            self.runtime_debug["precomputed_premarket_misses"] = int(
+                self.runtime_debug.get("precomputed_premarket_misses", 0)
+            ) + 1
+            return None
+        self.runtime_debug["precomputed_premarket_hits"] = int(
+            self.runtime_debug.get("precomputed_premarket_hits", 0)
+        ) + 1
+        return payload
 
     def _next_rth_open_utc(self, now_est: datetime) -> datetime:
         start_hour = self._rth_start_minute // 60
@@ -574,7 +784,7 @@ class QM_MVP(QCAlgorithm):
             total += float(minute_volume.get(idx, 0.0))
         return total
 
-    def _evaluate_ep_activation(
+    def _evaluate_ep_activation_proxy(
         self,
         *,
         ticker: str,
@@ -582,9 +792,6 @@ class QM_MVP(QCAlgorithm):
         now_est: datetime,
         bar: Any,
     ) -> dict[str, Any]:
-        if intent.setup_type != "episodic_pivot":
-            return {"status": "pass"}
-
         prev = self._get_previous_day_row(ticker, now_est.date())
         if prev is None:
             return {"status": "fail", "code": "EP_PREV_DAY_MISSING", "message": "Missing D-1 bar"}
@@ -605,7 +812,7 @@ class QM_MVP(QCAlgorithm):
                 "status": "fail",
                 "code": "EP_GAP_UNDER_MIN",
                 "message": "Gap below min_gap_pct",
-                "evidence": {"gap_pct": gap_pct, "min_gap_pct": min_gap_pct},
+                "evidence": {"gap_pct": gap_pct, "min_gap_pct": min_gap_pct, "gate_source": "proxy_fallback"},
             }
 
         opening_minutes = max(1, int(intent.metadata.get("opening_volume_window_minutes", 20) or 20))
@@ -628,6 +835,7 @@ class QM_MVP(QCAlgorithm):
                     "opening_volume_ratio": ratio,
                     "min_opening_volume_ratio": min_ratio,
                     "opening_volume_window_minutes": opening_minutes,
+                    "gate_source": "proxy_fallback",
                 },
             }
         return {
@@ -638,8 +846,148 @@ class QM_MVP(QCAlgorithm):
                 "opening_volume_ratio": ratio,
                 "min_opening_volume_ratio": min_ratio,
                 "opening_volume_window_minutes": opening_minutes,
+                "gate_source": "proxy_fallback",
             },
         }
+
+    def _ep_gate_source_mode(self) -> str:
+        default_mode = "precomputed_preferred"
+        try:
+            cfg = getattr(self.run_config.setups, "episodic_pivot", None)
+            raw = getattr(cfg, "premarket_gate_source_mode", default_mode)
+        except builtins.Exception:
+            raw = default_mode
+        mode = str(raw or default_mode).strip().lower()
+        if mode in {"precomputed_preferred", "require_precomputed", "proxy_only"}:
+            return mode
+        return default_mode
+
+    def _evaluate_ep_activation(
+        self,
+        *,
+        ticker: str,
+        intent: SetupIntent,
+        now_est: datetime,
+        bar: Any,
+    ) -> dict[str, Any]:
+        if intent.setup_type != "episodic_pivot":
+            return {"status": "pass"}
+
+        mode = self._ep_gate_source_mode()
+
+        if mode == "proxy_only":
+            proxy = self._evaluate_ep_activation_proxy(ticker=ticker, intent=intent, now_est=now_est, bar=bar)
+            if proxy.get("status") == "pass":
+                self.runtime_debug["ep_gate_proxy_fallback_pass"] = int(
+                    self.runtime_debug.get("ep_gate_proxy_fallback_pass", 0)
+                ) + 1
+            elif proxy.get("status") == "fail":
+                self.runtime_debug["ep_gate_proxy_fallback_fail"] = int(
+                    self.runtime_debug.get("ep_gate_proxy_fallback_fail", 0)
+                ) + 1
+            return proxy
+
+        day = now_est.date()
+        pre = self._precomputed_premarket_row(ticker, day)
+        min_gap_pct = _safe_float(intent.metadata.get("min_gap_pct", 0.0), 0.0)
+        min_ratio = _safe_float(intent.metadata.get("min_opening_volume_ratio", 0.0), 0.0)
+
+        if pre:
+            gap_raw = pre.get("gap_vs_prev_close")
+            rel_raw = pre.get("rel_premarket_volume_20d")
+            gap_ratio = _safe_float(gap_raw, float("nan"))
+            rel_ratio = _safe_float(rel_raw, float("nan"))
+            has_gap = pd.notna(gap_ratio)
+            has_rel = pd.notna(rel_ratio)
+
+            if has_gap and has_rel:
+                gap_pct = float(gap_ratio) * 100.0
+                if gap_pct < min_gap_pct:
+                    self.runtime_debug["ep_gate_precomputed_fail"] = int(
+                        self.runtime_debug.get("ep_gate_precomputed_fail", 0)
+                    ) + 1
+                    return {
+                        "status": "fail",
+                        "code": "EP_PRE_GAP_UNDER_MIN",
+                        "message": "Premarket gap below min_gap_pct",
+                        "evidence": {
+                            "gate_source": "precomputed",
+                            "gate_mode": mode,
+                            "gap_pct": gap_pct,
+                            "min_gap_pct": min_gap_pct,
+                            "rel_premarket_volume_20d": float(rel_ratio),
+                            "min_opening_volume_ratio": min_ratio,
+                        },
+                    }
+                if float(rel_ratio) < min_ratio:
+                    self.runtime_debug["ep_gate_precomputed_fail"] = int(
+                        self.runtime_debug.get("ep_gate_precomputed_fail", 0)
+                    ) + 1
+                    return {
+                        "status": "fail",
+                        "code": "EP_PRE_VOLUME_RATIO_UNDER_MIN",
+                        "message": "Premarket relative volume below min threshold",
+                        "evidence": {
+                            "gate_source": "precomputed",
+                            "gate_mode": mode,
+                            "gap_pct": gap_pct,
+                            "min_gap_pct": min_gap_pct,
+                            "rel_premarket_volume_20d": float(rel_ratio),
+                            "min_opening_volume_ratio": min_ratio,
+                        },
+                    }
+                self.runtime_debug["ep_gate_precomputed_pass"] = int(self.runtime_debug.get("ep_gate_precomputed_pass", 0)) + 1
+                return {
+                    "status": "pass",
+                    "evidence": {
+                        "gate_source": "precomputed",
+                        "gate_mode": mode,
+                        "gap_pct": gap_pct,
+                        "min_gap_pct": min_gap_pct,
+                        "opening_volume_ratio": float(rel_ratio),
+                        "opening_volume_ratio_metric": "rel_premarket_volume_20d",
+                        "min_opening_volume_ratio": min_ratio,
+                    },
+                }
+
+            if mode == "require_precomputed":
+                self.runtime_debug["ep_gate_precomputed_fail"] = int(self.runtime_debug.get("ep_gate_precomputed_fail", 0)) + 1
+                return {
+                    "status": "fail",
+                    "code": "EP_PRECOMPUTED_INCOMPLETE",
+                    "message": "Premarket precomputed row missing required fields",
+                    "evidence": {
+                        "gate_source": "precomputed",
+                        "gate_mode": mode,
+                        "has_gap_vs_prev_close": bool(has_gap),
+                        "has_rel_premarket_volume_20d": bool(has_rel),
+                    },
+                }
+
+        elif mode == "require_precomputed":
+            self.runtime_debug["ep_gate_precomputed_fail"] = int(self.runtime_debug.get("ep_gate_precomputed_fail", 0)) + 1
+            return {
+                "status": "fail",
+                "code": "EP_PRECOMPUTED_MISSING",
+                "message": "Premarket precomputed row missing for symbol/day",
+                "evidence": {
+                    "gate_source": "precomputed",
+                    "gate_mode": mode,
+                    "symbol": ticker,
+                    "trade_day": str(day),
+                },
+            }
+
+        fallback = self._evaluate_ep_activation_proxy(ticker=ticker, intent=intent, now_est=now_est, bar=bar)
+        if fallback.get("status") == "pass":
+            self.runtime_debug["ep_gate_proxy_fallback_pass"] = int(
+                self.runtime_debug.get("ep_gate_proxy_fallback_pass", 0)
+            ) + 1
+        elif fallback.get("status") == "fail":
+            self.runtime_debug["ep_gate_proxy_fallback_fail"] = int(
+                self.runtime_debug.get("ep_gate_proxy_fallback_fail", 0)
+            ) + 1
+        return fallback
 
     def _resolve_stop_price_strict(
         self,
@@ -805,7 +1153,12 @@ class QM_MVP(QCAlgorithm):
         self.daily_history[ticker] = hist
 
         signal_day = self._next_trading_day(day)
-        ctx = DailyScanContext(signal_day=signal_day, generated_at_utc=datetime.now(timezone.utc))
+        indicator_row = self._precomputed_indicator_row(ticker, day)
+        ctx = DailyScanContext(
+            signal_day=signal_day,
+            generated_at_utc=datetime.now(timezone.utc),
+            precomputed_daily_indicators=indicator_row,
+        )
 
         close_value = float(row.get("close", 0.0))
         universe_eval = self._evaluate_universe_filters(

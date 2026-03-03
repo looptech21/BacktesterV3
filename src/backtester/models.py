@@ -48,6 +48,7 @@ class DailyScanContext:
     signal_day: date
     generated_at_utc: datetime
     timezone: str = "America/New_York"
+    precomputed_daily_indicators: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
