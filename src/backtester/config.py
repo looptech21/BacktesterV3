@@ -39,6 +39,13 @@ class DataConfig(BaseModel):
     rth_start: str = "09:30"
     rth_end: str = "16:00"
     timestamp_alignment: Literal["auto", "utc", "eastern"] = "auto"
+    source_layout: Literal["symbol_year"] = "symbol_year"
+    lean_feed_scope: Literal["full", "rth"] = "full"
+    split_adjustment_mode: Literal["none", "splits_backward"] = "none"
+    split_events_file: Path = Path(
+        "/mnt/Daten/Backtest_data/Stock_splits_corporate_actions/hf_defeatbeta_stock_split_events_2026-02-16.parquet"
+    )
+    split_adjust_volume: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -49,12 +56,13 @@ class DataConfig(BaseModel):
 class UniverseFiltersConfig(BaseModel):
     model_config = _FROZEN
 
-    min_price: float | None = None
+    min_price: float | None = 5.0
     max_price: float | None = None
-    min_avg_dollar_vol_20: float | None = None
+    min_avg_dollar_vol_20: float | None = 1_000_000.0
+    min_adr_pct: float | None = 3.0
     exclude_otc: bool = True
 
-    @field_validator("min_price", "max_price", "min_avg_dollar_vol_20")
+    @field_validator("min_price", "max_price", "min_avg_dollar_vol_20", "min_adr_pct")
     @classmethod
     def validate_non_negative(cls, value: float | None) -> float | None:
         if value is not None and value < 0:
@@ -111,10 +119,19 @@ class CommonBreakoutConfig(BaseModel):
 
     enabled: bool = True
     impulse_lookback_days: int = 63
-    min_impulse_return_pct: float = 30.0
+    min_impulse_return_pct: float = 50.0
+    min_3m_return_pct: float | None = 40.0
     consolidation_min_days: int = 10
     consolidation_max_days: int = 40
     max_consolidation_depth_pct: float = 25.0
+    require_orderly_lows: bool = True
+    consolidation_low_tolerance_pct: float = 2.0
+    require_tightening: bool = True
+    require_ma_alignment: bool = True
+    ma_alignment_periods: list[int] = Field(default_factory=lambda: [20, 50])
+    ma_alignment_tolerance_pct: float = 3.0
+    require_volume_contraction: bool = True
+    max_consolidation_volume_ratio: float = 0.7
     orh_window_minutes: int = 5
     entry_ladder_minutes: list[int] = Field(default_factory=lambda: [1, 5, 60])
     stop_mode: Literal["running_lod", "running_lod_at_entry", "dminus1_open", "dminus1_low"] = "running_lod"
@@ -125,6 +142,7 @@ class CommonBreakoutConfig(BaseModel):
     partial_exit_day: int = 3
     partial_exit_fraction: float = 0.3333
     partial_exit_time: Literal["any_bar", "open", "close_window"] = "any_bar"
+    move_stop_to_be_after_partial: bool = True
     trailing_ma_days: int = 10
     ma_exit_execution: Literal["next_open", "moc"] = "next_open"
 
@@ -148,7 +166,7 @@ class EpisodicPivotConfig(BaseModel):
 
     enabled: bool = True
     min_gap_pct: float = 10.0
-    min_opening_volume_ratio: float = 1.0
+    min_opening_volume_ratio: float = 3.0
     opening_volume_window_minutes: int = 20
     ah_pm_mode: Literal["off", "proxy", "full"] = "off"
     orh_window_minutes: int = 5
@@ -159,8 +177,8 @@ class EpisodicPivotConfig(BaseModel):
     adr_period: int = 21
     max_stop_multiple: float = 1.0
     max_stop_multiple_hard: float = 1.5
-    max_prior_runup_pct: float | None = None
-    trailing_ma_days: int = 10
+    max_prior_runup_pct: float | None = 100.0
+    trailing_ma_days: int = 20
     trailing_switch_mode: Literal["ma_above_initial_stop"] = "ma_above_initial_stop"
     ma_exit_execution: Literal["next_open", "moc"] = "next_open"
     allow_scale_in: bool = False
@@ -221,6 +239,7 @@ class ExecutionConfig(BaseModel):
     min_commission: float = 1.0
     slippage_bps: float = 5.0
     leakage_guard: Literal["strict_t_plus_1"] = "strict_t_plus_1"
+    order_session_scope: Literal["rth_only", "full"] = "rth_only"
     entry_margin_buffer_pct: float = 0.02
     max_order_error_rate: float = 0.01
     long_only: bool = True

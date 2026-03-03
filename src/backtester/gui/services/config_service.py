@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-from calendar import monthrange
+import json
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import yaml
 
 from backtester.config import RunConfig
 from backtester.experiment import experiment_id
 from backtester.gui.state import AppState
 
-DATASET_BASE = Path("/media/hp14linux/Daten/Backtest_data/ohlcv_test_20_tickers")
-DATASET_PARQUET_BASE = DATASET_BASE / "parquet"
-DEFAULT_PARQUET_ROOT = DATASET_PARQUET_BASE / "session=rth" / "timeframe=1m"
-DEFAULT_PERIOD_START = date(2020, 1, 1)
-DEFAULT_PERIOD_END = date(2021, 12, 31)
+DATASET_ROOT = Path("/mnt/Daten/Backtest_data/processed_splitadjusted_OHLCV_1m5m15m1h1d")
+DATASET_PARQUET_BASE = DATASET_ROOT / "bars"
+DEFAULT_PARQUET_ROOT = DATASET_PARQUET_BASE / "5m"
+DEFAULT_PERIOD_START = date(2018, 1, 1)
+DEFAULT_PERIOD_END = date(2025, 12, 31)
 TIMEFRAME_ORDER = {"1m": 0, "5m": 1, "15m": 2, "1h": 3, "1d": 4}
 
 
@@ -29,12 +28,13 @@ class ConfigService:
     def available_parquet_roots(self) -> list[Path]:
         roots: list[Path] = []
         if DATASET_PARQUET_BASE.exists():
-            for session_dir in sorted(DATASET_PARQUET_BASE.glob("session=*")):
-                if not session_dir.is_dir():
+            for timeframe_dir in sorted(DATASET_PARQUET_BASE.iterdir()):
+                if not timeframe_dir.is_dir():
                     continue
-                for timeframe_dir in sorted(session_dir.glob("timeframe=*")):
-                    if timeframe_dir.is_dir():
-                        roots.append(timeframe_dir.resolve())
+                if timeframe_dir.name not in TIMEFRAME_ORDER:
+                    continue
+                if list(timeframe_dir.glob("symbol=*/year=*.parquet")):
+                    roots.append(timeframe_dir.resolve())
         if DEFAULT_PARQUET_ROOT.exists() and DEFAULT_PARQUET_ROOT.resolve() not in roots:
             roots.append(DEFAULT_PARQUET_ROOT.resolve())
         return sorted(roots, key=self._root_sort_key)
@@ -47,26 +47,25 @@ class ConfigService:
 
     def detect_period_for_parquet_root(self, parquet_root: Path) -> tuple[date, date] | None:
         root = Path(parquet_root)
-        if not root.exists():
+        if not root.exists() or not root.is_dir():
             return None
 
-        files = sorted(root.glob("ohlcv_*.parquet"))
-        if not files:
+        from_manifests = self._detect_period_from_manifests(root)
+        if from_manifests is not None:
+            return from_manifests
+
+        years: set[int] = set()
+        for path in root.glob("symbol=*/year=*.parquet"):
+            try:
+                year = int(path.stem.split("=", 1)[1])
+            except Exception:
+                continue
+            years.add(year)
+
+        if not years:
             return None
 
-        first_day = self._read_edge_day(files[0], find_max=False)
-        last_day = self._read_edge_day(files[-1], find_max=True)
-
-        if first_day is None:
-            first_day = self._month_start_from_filename(files[0].stem)
-        if last_day is None:
-            last_day = self._month_end_from_filename(files[-1].stem)
-
-        if first_day is None or last_day is None:
-            return None
-        if last_day < first_day:
-            return None
-        return first_day, last_day
+        return date(min(years), 1, 1), date(max(years), 12, 31)
 
     def build_default_config(self) -> RunConfig:
         roots = self.available_parquet_roots()
@@ -93,11 +92,17 @@ class ConfigService:
                 "timezone": "America/New_York",
                 "rth_start": "09:30",
                 "rth_end": "16:00",
+                "source_layout": "symbol_year",
+                "lean_feed_scope": "full",
+                "split_adjustment_mode": "none",
             },
             "universe": {
                 "mode": "custom_list",
                 "tickers": ["AAPL", "TSLA", "NVDA"],
                 "filters": {"exclude_otc": True},
+            },
+            "execution": {
+                "order_session_scope": "rth_only",
             },
             "output": {"dir": self.state.output_root},
         }
@@ -131,81 +136,71 @@ class ConfigService:
         return self.yaml_to_config(raw)
 
     def lean_data_root_for_parquet_root(self, parquet_root: Path) -> Path:
-        session, timeframe = self.session_timeframe_from_path(Path(parquet_root))
-        return self.state.output_root / "lean_data" / f"session_{session}_timeframe_{timeframe}"
+        _, timeframe = self.session_timeframe_from_path(Path(parquet_root))
+        return self.state.output_root / "lean_data" / f"timeframe_{timeframe}"
+
+    def _detect_period_from_manifests(self, parquet_root: Path) -> tuple[date, date] | None:
+        dataset_root = self._dataset_root_from_parquet_root(parquet_root)
+        if dataset_root is None:
+            return None
+
+        eligibility_path = dataset_root / "manifests" / "universe" / "eligibility_summary.json"
+        if eligibility_path.exists():
+            try:
+                payload = json.loads(eligibility_path.read_text(encoding="utf-8"))
+                start_text = str(payload.get("start_date") or "")
+                per_year = payload.get("per_year") or []
+                years = []
+                for row in per_year:
+                    if isinstance(row, dict) and "year" in row:
+                        years.append(int(row["year"]))
+                if start_text and years:
+                    start_day = date.fromisoformat(start_text)
+                    end_day = date(max(years), 12, 31)
+                    if end_day >= start_day:
+                        return start_day, end_day
+            except Exception:
+                pass
+
+        build_manifest_path = dataset_root / "manifests" / "build_manifest.json"
+        if build_manifest_path.exists():
+            try:
+                payload = json.loads(build_manifest_path.read_text(encoding="utf-8"))
+                horizon = str(payload.get("split_horizon_end_date") or "")
+                if horizon:
+                    end_day = date.fromisoformat(horizon)
+                    return DEFAULT_PERIOD_START, end_day
+            except Exception:
+                pass
+
+        return None
+
+    @staticmethod
+    def _dataset_root_from_parquet_root(parquet_root: Path) -> Path | None:
+        root = Path(parquet_root)
+        if root.name in TIMEFRAME_ORDER and root.parent.name == "bars":
+            return root.parent.parent
+        if root.name == "bars":
+            return root.parent
+        return None
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _root_sort_key(path: Path) -> tuple[str, int, str]:
-        session = "unknown"
-        timeframe = "unknown"
-        for part in path.parts:
-            if part.startswith("session="):
-                session = part.split("=", 1)[1]
-            if part.startswith("timeframe="):
-                timeframe = part.split("=", 1)[1]
-        return session, TIMEFRAME_ORDER.get(timeframe, 99), str(path)
+    def _root_sort_key(path: Path) -> tuple[int, str]:
+        timeframe = path.name if path.name in TIMEFRAME_ORDER else "unknown"
+        return TIMEFRAME_ORDER.get(timeframe, 99), str(path)
 
     @staticmethod
     def _label_for_parquet_root(path: Path) -> str:
-        session, timeframe = ConfigService.session_timeframe_from_path(path)
-        return f"{session} / {timeframe}"
+        _, timeframe = ConfigService.session_timeframe_from_path(path)
+        return f"full / {timeframe}"
 
     @staticmethod
     def session_timeframe_from_path(path: Path) -> tuple[str, str]:
-        session = "custom"
-        timeframe = "custom"
-        for part in path.parts:
-            if part.startswith("session="):
-                session = part.split("=", 1)[1]
-            if part.startswith("timeframe="):
-                timeframe = part.split("=", 1)[1]
-        return session, timeframe
-
-    @staticmethod
-    def _read_edge_day(file_path: Path, *, find_max: bool) -> date | None:
-        try:
-            sample = pd.read_parquet(file_path)
-        except Exception:
-            return None
-        if sample.empty:
-            return None
-
-        if "trading_day_est" in sample.columns:
-            values = pd.to_datetime(sample["trading_day_est"], errors="coerce")
-            values = values.dropna()
-            if values.empty:
-                return None
-            return values.max().date() if find_max else values.min().date()
-
-        if "timestamp" in sample.columns:
-            values = pd.to_datetime(sample["timestamp"], errors="coerce", utc=True).dropna()
-            if values.empty:
-                return None
-            values_est = values.dt.tz_convert("America/New_York")
-            return values_est.max().date() if find_max else values_est.min().date()
-
-        return None
-
-    @staticmethod
-    def _month_start_from_filename(stem: str) -> date | None:
-        prefix = "ohlcv_"
-        if not stem.startswith(prefix):
-            return None
-        ym = stem[len(prefix):]
-        try:
-            year_text, month_text = ym.split("-")
-            return date(int(year_text), int(month_text), 1)
-        except Exception:
-            return None
-
-    @staticmethod
-    def _month_end_from_filename(stem: str) -> date | None:
-        start = ConfigService._month_start_from_filename(stem)
-        if start is None:
-            return None
-        last_day = monthrange(start.year, start.month)[1]
-        return date(start.year, start.month, last_day)
+        # Strict new layout only: .../bars/<timeframe>
+        if path.name in TIMEFRAME_ORDER:
+            return "full", path.name
+        return "full", "custom"

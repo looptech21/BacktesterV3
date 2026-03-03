@@ -184,9 +184,18 @@ class QM_MVP(QCAlgorithm):
         )
         self.SetCash(self.run_config.execution.initial_cash)
 
+        self._bar_step_minutes = self._resolve_bar_step_minutes()
+        self._order_session_scope = str(self.run_config.execution.order_session_scope or "rth_only")
+        self._rth_start_minute = self._parse_hhmm_to_minute(self.run_config.data.rth_start, default=570)
+        self._rth_end_minute = self._parse_hhmm_to_minute(self.run_config.data.rth_end, default=960)
+
         self.symbol_map: dict[str, Any] = {}
         for ticker in self.tickers:
-            security = self.AddEquity(ticker, Resolution.Minute)
+            security = self.AddEquity(
+                ticker,
+                Resolution.Minute,
+                extendedMarketHours=self.run_config.data.lean_feed_scope == "full",
+            )
             self.symbol_map[ticker] = security.Symbol
 
         cb_raw = self.run_config.setups.common_breakout.model_dump()
@@ -266,6 +275,62 @@ class QM_MVP(QCAlgorithm):
         except builtins.Exception:
             pass
         return probe
+
+    @staticmethod
+    def _parse_hhmm_to_minute(value: str, *, default: int) -> int:
+        try:
+            parts = str(value or "").split(":")
+            hour = int(parts[0])
+            minute = int(parts[1])
+            parsed = hour * 60 + minute
+            return parsed if 0 <= parsed <= 24 * 60 else default
+        except builtins.Exception:
+            return default
+
+    def _resolve_bar_step_minutes(self) -> int:
+        markers = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}
+        root = Path(str(self.run_config.data.parquet_root).lower())
+
+        # Strict new layout only: .../bars/<timeframe>
+        if root.name in markers:
+            return markers[root.name]
+
+        return 1
+
+    def _is_rth_time(self, now_est: datetime, *, include_end: bool = False) -> bool:
+        minute_of_day = now_est.hour * 60 + now_est.minute
+        if include_end:
+            return self._rth_start_minute <= minute_of_day <= self._rth_end_minute
+        return self._rth_start_minute <= minute_of_day < self._rth_end_minute
+
+    def _intent_delay(self) -> timedelta:
+        return timedelta(minutes=max(1, int(self._bar_step_minutes)))
+
+    def _next_rth_open_utc(self, now_est: datetime) -> datetime:
+        start_hour = self._rth_start_minute // 60
+        start_minute = self._rth_start_minute % 60
+        minute_of_day = now_est.hour * 60 + now_est.minute
+
+        if minute_of_day < self._rth_start_minute:
+            target_day = now_est.date()
+        else:
+            target_day = self._next_trading_day(now_est.date())
+
+        try:
+            sample_symbol = next(iter(self.symbol_map.values()))
+            exchange_hours = self.Securities[sample_symbol].Exchange.Hours
+            while not exchange_hours.IsDateOpen(target_day):
+                target_day += timedelta(days=1)
+        except builtins.Exception:
+            pass
+
+        open_est = datetime.combine(target_day, datetime.min.time(), tzinfo=now_est.tzinfo).replace(
+            hour=start_hour,
+            minute=start_minute,
+            second=0,
+            microsecond=0,
+        )
+        return open_est.astimezone(timezone.utc)
 
     @staticmethod
     def _normalize_stop_mode(mode: str) -> str:
@@ -403,6 +468,24 @@ class QM_MVP(QCAlgorithm):
             evidence["adv20_dollar_vol"] = adv20
             if adv20 < min_adv_v:
                 return False, "UNIVERSE_ADV20_UNDER_MIN", evidence
+
+        min_adr_pct = filters.get("min_adr_pct")
+        if min_adr_pct not in (None, ""):
+            min_adr_pct_v = _safe_float(min_adr_pct, 0.0)
+            evidence["min_adr_pct"] = min_adr_pct_v
+            tail = hist.tail(21) if not hist.empty else pd.DataFrame()
+            if tail.empty:
+                return False, "UNIVERSE_ADR_MISSING", evidence
+            high_s = pd.to_numeric(tail.get("high"), errors="coerce")
+            low_s = pd.to_numeric(tail.get("low"), errors="coerce")
+            close_s = pd.to_numeric(tail.get("close"), errors="coerce")
+            valid = close_s.dropna()
+            if valid.empty or (valid == 0).all():
+                return False, "UNIVERSE_ADR_MISSING", evidence
+            adr_pct = float(((high_s - low_s) / close_s).dropna().mean() * 100.0)
+            evidence["adr_pct"] = adr_pct
+            if adr_pct < min_adr_pct_v:
+                return False, "UNIVERSE_ADR_UNDER_MIN", evidence
 
         if bool(filters.get("exclude_otc", True)):
             evidence["exclude_otc"] = True
@@ -828,7 +911,7 @@ class QM_MVP(QCAlgorithm):
                     order_type="MARKET",
                     signal_ts_utc=ma_plan.signal_ts_utc,
                     created_ts_utc=ma_plan.signal_ts_utc,
-                    earliest_exec_ts_utc=ma_plan.signal_ts_utc + timedelta(minutes=1),
+                    earliest_exec_ts_utc=ma_plan.signal_ts_utc + self._intent_delay(),
                     qty=ma_plan.qty,
                     metadata={
                         "role": "exit",
@@ -855,7 +938,7 @@ class QM_MVP(QCAlgorithm):
                     order_type="MARKET",
                     signal_ts_utc=signal_ts,
                     created_ts_utc=signal_ts,
-                    earliest_exec_ts_utc=signal_ts + timedelta(minutes=1),
+                    earliest_exec_ts_utc=signal_ts + self._intent_delay(),
                     qty=position.qty_open,
                     metadata={
                         "role": "exit",
@@ -1040,6 +1123,11 @@ class QM_MVP(QCAlgorithm):
         position.qty_open -= consumed
         if str(meta.get("exit_reason", "")).startswith("partial_exit_day"):
             position.partial_done = True
+            # Move stop to break-even after partial exit
+            cb_cfg = self.run_config.setups.common_breakout
+            if getattr(cb_cfg, "move_stop_to_be_after_partial", True):
+                be_stop = max(position.dynamic_stop, position.entry_avg_price)
+                position.dynamic_stop = be_stop
 
         if position.qty_open <= 0:
             self.positions_by_lot.pop(lot_id, None)
@@ -1058,7 +1146,7 @@ class QM_MVP(QCAlgorithm):
                 order_type="MARKET",
                 signal_ts_utc=now_utc,
                 created_ts_utc=now_utc,
-                earliest_exec_ts_utc=now_utc + timedelta(minutes=1),
+                earliest_exec_ts_utc=now_utc + self._intent_delay(),
                 qty=position.qty_open,
                 metadata={
                     "role": "exit",
@@ -1076,6 +1164,9 @@ class QM_MVP(QCAlgorithm):
                 self.runtime_debug["forced_flatten_signals"] += 1
 
     def _process_exit_rules(self, data: Any, now_est: datetime, now_utc: datetime) -> None:
+        if self._order_session_scope == "rth_only" and not self._is_rth_time(now_est, include_end=True):
+            return
+
         close_window = self._is_close_window(now_est)
         end_flatten = (
             self.run_config.execution.force_flatten_on_end
@@ -1093,7 +1184,7 @@ class QM_MVP(QCAlgorithm):
             bar = data.Bars[symbol]
             snapshot = self._position_snapshot(position)
 
-            stop_intent = evaluate_intraday_stop(snapshot, bar, now_utc)
+            stop_intent = evaluate_intraday_stop(snapshot, bar, now_utc, bar_step_minutes=self._bar_step_minutes)
             if stop_intent:
                 stop_intent = OrderIntent(
                     experiment_id=stop_intent.experiment_id,
@@ -1117,7 +1208,12 @@ class QM_MVP(QCAlgorithm):
             if stop_intent and self._queue_exit_intent(stop_intent):
                 self.runtime_debug["intraday_stop_signals"] += 1
 
-            partial_intent = evaluate_partial_exit(snapshot, now_est, self.run_config.setups.common_breakout)
+            partial_intent = evaluate_partial_exit(
+                snapshot,
+                now_est,
+                self.run_config.setups.common_breakout,
+                bar_step_minutes=self._bar_step_minutes,
+            )
             if partial_intent:
                 partial_intent = OrderIntent(
                     experiment_id=partial_intent.experiment_id,
@@ -1183,6 +1279,9 @@ class QM_MVP(QCAlgorithm):
         return state
 
     def _process_entry_rules(self, data: Any, now_est: datetime, now_utc: datetime) -> None:
+        if self._order_session_scope == "rth_only" and not self._is_rth_time(now_est, include_end=False):
+            return
+
         today = now_est.date()
         day_intents = self.pending_intents_by_day.get(today, [])
         if not day_intents:
@@ -1414,7 +1513,7 @@ class QM_MVP(QCAlgorithm):
                 order_type="MARKET",
                 signal_ts_utc=signal_ts,
                 created_ts_utc=signal_ts,
-                earliest_exec_ts_utc=signal_ts + timedelta(minutes=1),
+                earliest_exec_ts_utc=signal_ts + self._intent_delay(),
                 qty=final_qty,
                 trigger_price=trigger,
                 stop_price=stop_price,
@@ -1470,7 +1569,28 @@ class QM_MVP(QCAlgorithm):
         self._process_exit_rules(data, now_est, now_utc)
         self._process_entry_rules(data, now_est, now_utc)
 
-        for intent in self.order_queue.pop_ready(now_utc):
+        ready_intents = self.order_queue.pop_ready(now_utc)
+        if self._order_session_scope == "rth_only" and not self._is_rth_time(now_est, include_end=True):
+            defer_to = self._next_rth_open_utc(now_est)
+            for intent in ready_intents:
+                deferred = OrderIntent(
+                    experiment_id=intent.experiment_id,
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    order_type=intent.order_type,
+                    signal_ts_utc=intent.signal_ts_utc,
+                    created_ts_utc=intent.created_ts_utc,
+                    earliest_exec_ts_utc=defer_to,
+                    qty=intent.qty,
+                    trigger_price=intent.trigger_price,
+                    limit_price=intent.limit_price,
+                    stop_price=intent.stop_price,
+                    metadata={**intent.metadata, "deferred_outside_rth": True},
+                )
+                self.order_queue.enqueue(deferred)
+            return
+
+        for intent in ready_intents:
             self._submit_order_intent(intent, now_utc)
 
     def OnOrderEvent(self, orderEvent: Any) -> None:  # noqa: N802

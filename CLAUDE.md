@@ -131,12 +131,17 @@ Progress stages shown in UI:
 ## Default Config Behavior
 
 `ConfigService.build_default_config()`:
-- pre-fills `data.parquet_root` with:
-  - `/media/hp14linux/Daten/Backtest_data/ohlcv_test_20_tickers/parquet/session=rth/timeframe=1m`
-  - only when the path exists
-- fallback when not found: `parquet_data`
-- baseline period: `2020-01-01` to `2021-12-31`
+- pre-fills `data.parquet_root` from frozen dataset roots under:
+  - `/mnt/Daten/Backtest_data/processed_splitadjusted_OHLCV_1m5m15m1h1d/bars/{5m,15m,1h,1d}`
+  - default preference is `bars/5m` when available
+- period is detected from manifests/year files (fallback `2018-01-01` to `2025-12-31`)
 - baseline tickers: `AAPL, TSLA, NVDA`
+- data defaults include:
+  - `source_layout=symbol_year`
+  - `lean_feed_scope=full`
+  - `split_adjustment_mode=none`
+- execution defaults include:
+  - `order_session_scope=rth_only`
 
 ## LEAN Runner Note
 

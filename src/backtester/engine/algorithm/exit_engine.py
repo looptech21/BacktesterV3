@@ -43,6 +43,8 @@ def _base_exit_intent(
     signal_ts_utc: datetime,
     qty: int,
     reason: str,
+    *,
+    bar_step_minutes: int = 1,
 ) -> OrderIntent:
     return OrderIntent(
         experiment_id=position.experiment_id,
@@ -51,7 +53,7 @@ def _base_exit_intent(
         order_type="MARKET",
         signal_ts_utc=signal_ts_utc,
         created_ts_utc=signal_ts_utc,
-        earliest_exec_ts_utc=signal_ts_utc + timedelta(minutes=1),
+        earliest_exec_ts_utc=signal_ts_utc + timedelta(minutes=max(1, int(bar_step_minutes))),
         qty=max(0, int(qty)),
         metadata={
             "role": "exit",
@@ -64,7 +66,13 @@ def _base_exit_intent(
     )
 
 
-def evaluate_intraday_stop(position: PositionSnapshot, bar: Any, now_utc: datetime) -> OrderIntent | None:
+def evaluate_intraday_stop(
+    position: PositionSnapshot,
+    bar: Any,
+    now_utc: datetime,
+    *,
+    bar_step_minutes: int = 1,
+) -> OrderIntent | None:
     if position.qty_open <= 0:
         return None
     low = float(getattr(bar, "Low", getattr(bar, "low", 0.0)))
@@ -74,6 +82,7 @@ def evaluate_intraday_stop(position: PositionSnapshot, bar: Any, now_utc: dateti
             signal_ts_utc=now_utc,
             qty=position.qty_open,
             reason="intraday_stop",
+            bar_step_minutes=bar_step_minutes,
         )
     return None
 
@@ -86,7 +95,13 @@ def _is_close_window(now_est: datetime) -> bool:
     return (now_est.hour == 15 and now_est.minute >= 58) or now_est.hour > 15
 
 
-def evaluate_partial_exit(position: PositionSnapshot, now_est: datetime, config: Any) -> OrderIntent | None:
+def evaluate_partial_exit(
+    position: PositionSnapshot,
+    now_est: datetime,
+    config: Any,
+    *,
+    bar_step_minutes: int = 1,
+) -> OrderIntent | None:
     if position.qty_open <= 1:
         return None
     if position.setup_type != "common_breakout":
@@ -114,6 +129,7 @@ def evaluate_partial_exit(position: PositionSnapshot, now_est: datetime, config:
         signal_ts_utc=signal_ts,
         qty=qty,
         reason=f"partial_exit_day_{partial_day}",
+        bar_step_minutes=bar_step_minutes,
     )
 
 

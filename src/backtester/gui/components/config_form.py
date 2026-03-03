@@ -197,6 +197,40 @@ class ConfigForm:
                         value=str(cfg.data.cache_root),
                         on_change=lambda _: self._apply_form(),
                     )
+                    self.controls["data.source_layout"] = ui.select(
+                        label="Source Layout",
+                        options={"symbol_year": "Symbol/Year Parquet"},
+                        value=cfg.data.source_layout,
+                        on_change=lambda _: self._apply_form(),
+                    )
+                    self.controls["data.lean_feed_scope"] = ui.select(
+                        label="LEAN Feed Scope",
+                        options={
+                            "full": "Full Session (pre + RTH + post)",
+                            "rth": "RTH Only",
+                        },
+                        value=cfg.data.lean_feed_scope,
+                        on_change=lambda _: self._apply_form(),
+                    )
+                    self.controls["data.split_adjustment_mode"] = ui.select(
+                        label="Split Adjustment Mode",
+                        options={
+                            "none": "None (Already Adjusted)",
+                            "splits_backward": "Backward Split-Adjusted",
+                        },
+                        value=cfg.data.split_adjustment_mode,
+                        on_change=lambda _: self._apply_form(),
+                    )
+                    self.controls["data.split_events_file"] = ui.input(
+                        "Split Events File",
+                        value=str(cfg.data.split_events_file),
+                        on_change=lambda _: self._apply_form(),
+                    ).classes("col-span-2")
+                    self.controls["data.split_adjust_volume"] = ui.switch(
+                        "Scale Volume With Splits",
+                        value=cfg.data.split_adjust_volume,
+                        on_change=lambda _: self._apply_form(),
+                    )
                 self._set_period_hint_from_root(current_root)
 
             with ui.card().classes("w-full"):
@@ -233,6 +267,11 @@ class ConfigForm:
                         value=""
                         if cfg.universe.filters.min_avg_dollar_vol_20 is None
                         else str(cfg.universe.filters.min_avg_dollar_vol_20),
+                        on_change=lambda _: self._apply_form(),
+                    )
+                    self.controls["universe.filters.min_adr_pct"] = ui.input(
+                        "Min ADR % (optional)",
+                        value="" if cfg.universe.filters.min_adr_pct is None else str(cfg.universe.filters.min_adr_pct),
                         on_change=lambda _: self._apply_form(),
                     )
                     self.controls["universe.filters.exclude_otc"] = ui.switch(
@@ -276,6 +315,51 @@ class ConfigForm:
                             value=cb.max_consolidation_depth_pct,
                             on_change=lambda _: self._apply_form(),
                         )
+                        self.controls["setups.common_breakout.min_3m_return_pct"] = ui.input(
+                            "Min 3-Month Return % (optional)",
+                            value="" if cb.min_3m_return_pct is None else str(cb.min_3m_return_pct),
+                            on_change=lambda _: self._apply_form(),
+                        )
+                        self.controls["setups.common_breakout.require_orderly_lows"] = ui.switch(
+                            "Require Orderly Lows",
+                            value=cb.require_orderly_lows,
+                            on_change=lambda _: self._apply_form(),
+                        )
+                        self.controls["setups.common_breakout.consolidation_low_tolerance_pct"] = ui.number(
+                            "Consolidation Low Tolerance %",
+                            value=cb.consolidation_low_tolerance_pct,
+                            on_change=lambda _: self._apply_form(),
+                        )
+                        self.controls["setups.common_breakout.require_tightening"] = ui.switch(
+                            "Require Tightening",
+                            value=cb.require_tightening,
+                            on_change=lambda _: self._apply_form(),
+                        )
+                        self.controls["setups.common_breakout.require_ma_alignment"] = ui.switch(
+                            "Require MA Alignment",
+                            value=cb.require_ma_alignment,
+                            on_change=lambda _: self._apply_form(),
+                        )
+                        self.controls["setups.common_breakout.ma_alignment_periods"] = ui.input(
+                            "MA Alignment Periods",
+                            value=", ".join(str(v) for v in cb.ma_alignment_periods),
+                            on_change=lambda _: self._apply_form(),
+                        )
+                        self.controls["setups.common_breakout.ma_alignment_tolerance_pct"] = ui.number(
+                            "MA Alignment Tolerance %",
+                            value=cb.ma_alignment_tolerance_pct,
+                            on_change=lambda _: self._apply_form(),
+                        )
+                        self.controls["setups.common_breakout.require_volume_contraction"] = ui.switch(
+                            "Require Volume Contraction",
+                            value=cb.require_volume_contraction,
+                            on_change=lambda _: self._apply_form(),
+                        )
+                        self.controls["setups.common_breakout.max_consolidation_volume_ratio"] = ui.number(
+                            "Max Consolidation Volume Ratio",
+                            value=cb.max_consolidation_volume_ratio,
+                            on_change=lambda _: self._apply_form(),
+                        )
                         self.controls["setups.common_breakout.orh_window_minutes"] = ui.number(
                             "ORH Window Minutes",
                             value=cb.orh_window_minutes,
@@ -310,6 +394,11 @@ class ConfigForm:
                         self.controls["setups.common_breakout.partial_exit_fraction"] = ui.number(
                             "Partial Exit Fraction",
                             value=cb.partial_exit_fraction,
+                            on_change=lambda _: self._apply_form(),
+                        )
+                        self.controls["setups.common_breakout.move_stop_to_be_after_partial"] = ui.switch(
+                            "Move Stop to BE After Partial",
+                            value=cb.move_stop_to_be_after_partial,
                             on_change=lambda _: self._apply_form(),
                         )
                         self.controls["setups.common_breakout.trailing_ma_days"] = ui.number(
@@ -437,6 +526,15 @@ class ConfigForm:
                             value=ex.allow_overnight,
                             on_change=lambda _: self._apply_form(),
                         )
+                        self.controls["execution.order_session_scope"] = ui.select(
+                            label="Order Session Scope",
+                            options={
+                                "rth_only": "RTH Only (Execution)",
+                                "full": "Full Session (Execution)",
+                            },
+                            value=ex.order_session_scope,
+                            on_change=lambda _: self._apply_form(),
+                        )
                         self.controls["execution.force_flatten_on_end"] = ui.switch(
                             "Force Flatten on End",
                             value=ex.force_flatten_on_end,
@@ -506,12 +604,18 @@ class ConfigForm:
             return
         start_day, end_day = detected
         timeframe_label = ""
-        for part in Path(root_value).parts:
-            if part.startswith("timeframe="):
-                timeframe = part.split("=", 1)[1]
-                if timeframe != "1m":
-                    timeframe_label = f" (timeframe={timeframe}; engine expects 1m for best fidelity)"
-                break
+        timeframe: str | None = None
+        parts = list(Path(root_value).parts)
+        for idx, part in enumerate(parts):
+            if part == "bars" and idx + 1 < len(parts):
+                candidate = parts[idx + 1]
+                if candidate in {"1m", "5m", "15m", "1h", "1d"}:
+                    timeframe = candidate
+                    break
+
+        if timeframe and timeframe != "1m":
+            timeframe_label = f" (timeframe={timeframe}; coarser bars reduce execution fidelity)"
+
         self._period_hint_label.text = f"Detected available period: {start_day} to {end_day}{timeframe_label}"
 
     def _on_parquet_root_choice_changed(self) -> None:
@@ -597,10 +701,15 @@ class ConfigForm:
 
         data["data"]["parquet_root"] = str(controls["data.parquet_root"].value).strip()
         data["data"]["timezone"] = str(controls["data.timezone"].value).strip()
+        data["data"]["source_layout"] = str(controls["data.source_layout"].value or "symbol_year")
+        data["data"]["lean_feed_scope"] = str(controls["data.lean_feed_scope"].value or "full")
         data["data"]["rth_start"] = str(controls["data.rth_start"].value).strip()
         data["data"]["rth_end"] = str(controls["data.rth_end"].value).strip()
         data["data"]["lean_data_root"] = str(controls["data.lean_data_root"].value).strip()
         data["data"]["cache_root"] = str(controls["data.cache_root"].value).strip()
+        data["data"]["split_adjustment_mode"] = str(controls["data.split_adjustment_mode"].value or "none")
+        data["data"]["split_events_file"] = str(controls["data.split_events_file"].value).strip()
+        data["data"]["split_adjust_volume"] = bool(controls["data.split_adjust_volume"].value)
 
         data["universe"]["mode"] = str(controls["universe.mode"].value)
         tickers_csv = str(controls["universe.tickers_csv"].value).strip()
@@ -610,6 +719,9 @@ class ConfigForm:
         data["universe"]["filters"]["max_price"] = _to_optional_float(controls["universe.filters.max_price"].value)
         data["universe"]["filters"]["min_avg_dollar_vol_20"] = _to_optional_float(
             controls["universe.filters.min_avg_dollar_vol_20"].value
+        )
+        data["universe"]["filters"]["min_adr_pct"] = _to_optional_float(
+            controls["universe.filters.min_adr_pct"].value
         )
         data["universe"]["filters"]["exclude_otc"] = bool(controls["universe.filters.exclude_otc"].value)
 
@@ -629,6 +741,33 @@ class ConfigForm:
         data["setups"]["common_breakout"]["max_consolidation_depth_pct"] = float(
             controls["setups.common_breakout.max_consolidation_depth_pct"].value
         )
+        data["setups"]["common_breakout"]["min_3m_return_pct"] = _to_optional_float(
+            controls["setups.common_breakout.min_3m_return_pct"].value
+        )
+        data["setups"]["common_breakout"]["require_orderly_lows"] = bool(
+            controls["setups.common_breakout.require_orderly_lows"].value
+        )
+        data["setups"]["common_breakout"]["consolidation_low_tolerance_pct"] = float(
+            controls["setups.common_breakout.consolidation_low_tolerance_pct"].value
+        )
+        data["setups"]["common_breakout"]["require_tightening"] = bool(
+            controls["setups.common_breakout.require_tightening"].value
+        )
+        data["setups"]["common_breakout"]["require_ma_alignment"] = bool(
+            controls["setups.common_breakout.require_ma_alignment"].value
+        )
+        data["setups"]["common_breakout"]["ma_alignment_periods"] = _to_int_list(
+            controls["setups.common_breakout.ma_alignment_periods"].value
+        )
+        data["setups"]["common_breakout"]["ma_alignment_tolerance_pct"] = float(
+            controls["setups.common_breakout.ma_alignment_tolerance_pct"].value
+        )
+        data["setups"]["common_breakout"]["require_volume_contraction"] = bool(
+            controls["setups.common_breakout.require_volume_contraction"].value
+        )
+        data["setups"]["common_breakout"]["max_consolidation_volume_ratio"] = float(
+            controls["setups.common_breakout.max_consolidation_volume_ratio"].value
+        )
         data["setups"]["common_breakout"]["orh_window_minutes"] = int(
             controls["setups.common_breakout.orh_window_minutes"].value
         )
@@ -644,6 +783,9 @@ class ConfigForm:
         )
         data["setups"]["common_breakout"]["partial_exit_fraction"] = float(
             controls["setups.common_breakout.partial_exit_fraction"].value
+        )
+        data["setups"]["common_breakout"]["move_stop_to_be_after_partial"] = bool(
+            controls["setups.common_breakout.move_stop_to_be_after_partial"].value
         )
         data["setups"]["common_breakout"]["trailing_ma_days"] = int(
             controls["setups.common_breakout.trailing_ma_days"].value
@@ -691,6 +833,9 @@ class ConfigForm:
         data["execution"]["max_holding_days"] = _to_optional_int(controls["execution.max_holding_days"].value)
         data["execution"]["long_only"] = bool(controls["execution.long_only"].value)
         data["execution"]["allow_overnight"] = bool(controls["execution.allow_overnight"].value)
+        data["execution"]["order_session_scope"] = str(
+            controls["execution.order_session_scope"].value or "rth_only"
+        )
         data["execution"]["force_flatten_on_end"] = bool(controls["execution.force_flatten_on_end"].value)
 
         data["runner"]["mode"] = str(controls["runner.mode"].value)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,7 @@ from nicegui import ui
 from backtester.gui.components.lightweight_chart import (
     LightweightCandleChart,
     bars_from_frame,
+    line_data_from_series,
     markers_from_internal_markers,
 )
 from backtester.gui.services.config_service import DATASET_PARQUET_BASE, TIMEFRAME_ORDER
@@ -21,6 +22,7 @@ DAILY_DEFAULT = "1d"
 EXECUTION_DEFAULT = "5m"
 INTRADAY_TIMEFRAMES = ("1m", "5m", "15m", "1h")
 BAR_LIMIT = 20_000
+MA_WARMUP_CALENDAR_DAYS = 80  # ~55 trading days, enough for 50-day MA
 
 
 def extract_trade_markers(trade: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -107,6 +109,24 @@ class TradeInspectionPanel:
                         on_change=lambda _: self._on_execution_timeframe_changed(),
                     )
 
+                with ui.row().classes("w-full items-center gap-4 mt-1"):
+                    ui.label("MA Overlays:").classes("text-sm text-slate-500")
+                    self._ma10_switch = ui.switch(
+                        "10-day",
+                        value=True,
+                        on_change=lambda _: self._render_charts(),
+                    ).props("dense")
+                    self._ma20_switch = ui.switch(
+                        "20-day",
+                        value=True,
+                        on_change=lambda _: self._render_charts(),
+                    ).props("dense")
+                    self._ma50_switch = ui.switch(
+                        "50-day",
+                        value=False,
+                        on_change=lambda _: self._render_charts(),
+                    ).props("dense")
+
                 self._status_label = ui.label("").classes("text-sm text-slate-500")
 
             with ui.card().classes("w-full"):
@@ -127,6 +147,16 @@ class TradeInspectionPanel:
         self._trades_by_id = {str(trade.get("trade_id") or idx): trade for idx, trade in enumerate(trades)}
 
         run_parquet_root = _run_parquet_root(self._run_config)
+        split_mode, split_events_file, split_adjust_volume, split_end_date, split_timezone = _run_split_adjustment_params(
+            self._run_config
+        )
+        self.market_data.configure_split_adjustment(
+            mode=split_mode,
+            split_events_file=split_events_file,
+            adjust_volume=split_adjust_volume,
+            end_date=split_end_date,
+            timezone=split_timezone,
+        )
         self._source_roots = _discover_source_roots(run_parquet_root)
         self._refresh_source_options(run_parquet_root)
 
@@ -260,6 +290,67 @@ class TradeInspectionPanel:
         self._execution_timeframe = str(self._execution_tf_select.value or "").strip() or None
         self._render_charts()
 
+    def _compute_ma_lines(
+        self,
+        full_bars_df: pd.DataFrame,
+        visible_bars_df: pd.DataFrame | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Compute MA line overlays using full history, filtered to visible range.
+
+        Parameters
+        ----------
+        full_bars_df:
+            Extended bar DataFrame including warmup history for correct MA values.
+        visible_bars_df:
+            The bars actually rendered as candlesticks. MA data points are
+            filtered to this range so the line doesn't extend beyond the chart.
+            If ``None``, the full dataset is used (no filtering).
+        """
+        if full_bars_df.empty or "close" not in full_bars_df.columns or "ts" not in full_bars_df.columns:
+            return {}
+
+        ma_configs: list[tuple[int, str]] = []
+        if self._ma10_switch.value:
+            ma_configs.append((10, "#f59e0b"))  # amber
+        if self._ma20_switch.value:
+            ma_configs.append((20, "#3b82f6"))  # blue
+        if self._ma50_switch.value:
+            ma_configs.append((50, "#a855f7"))  # purple
+
+        if not ma_configs:
+            return {}
+
+        # Determine visible time range for filtering
+        visible_min_ts: pd.Timestamp | None = None
+        visible_max_ts: pd.Timestamp | None = None
+        if visible_bars_df is not None and not visible_bars_df.empty and "ts" in visible_bars_df.columns:
+            visible_min_ts = visible_bars_df["ts"].min()
+            visible_max_ts = visible_bars_df["ts"].max()
+
+        lines: dict[str, dict[str, Any]] = {}
+        close = pd.to_numeric(full_bars_df["close"], errors="coerce")
+        for period, color in ma_configs:
+            if len(close) < period:
+                continue
+            ma = close.rolling(window=period, min_periods=period).mean()
+            valid = ma.dropna()
+            if valid.empty:
+                continue
+
+            # Filter to visible range
+            if visible_min_ts is not None and visible_max_ts is not None:
+                ts_vals = full_bars_df.loc[valid.index, "ts"]
+                mask = (ts_vals >= visible_min_ts) & (ts_vals <= visible_max_ts)
+                valid = valid[mask]
+                if valid.empty:
+                    continue
+
+            data = line_data_from_series(full_bars_df.loc[valid.index, "ts"], valid)
+            if data:
+                lines[f"MA{period}"] = {"data": data, "color": color, "lineWidth": 2}
+
+        return lines
+
     def _render_charts(self) -> None:
         if self._active_trade is None:
             self._trade_label.text = "Select a trade in the table to inspect."
@@ -279,6 +370,7 @@ class TradeInspectionPanel:
         symbol = str(self._active_trade.get("symbol") or "").upper().strip()
         trade_id = str(self._active_trade.get("trade_id") or "-")
         self._trade_label.text = f"{trade_id} · {symbol}"
+        self.market_data.clear_runtime_warnings()
 
         windows = self.market_data.make_trade_windows(
             self._active_trade.get("entry_fill_ts_utc"),
@@ -294,6 +386,16 @@ class TradeInspectionPanel:
             self._session,
             self._daily_timeframe,
             windows["daily"][0],
+            windows["daily"][1],
+        )
+
+        # Load extended daily history for MA warmup so MA values match the strategy
+        warmup_start = windows["daily"][0] - timedelta(days=MA_WARMUP_CALENDAR_DAYS)
+        daily_bars_extended = self.market_data.load_bars(
+            symbol,
+            self._session,
+            self._daily_timeframe,
+            warmup_start,
             windows["daily"][1],
         )
 
@@ -322,6 +424,7 @@ class TradeInspectionPanel:
             )
 
         daily_bars, daily_capped = _cap_bars(daily_bars, BAR_LIMIT)
+        daily_bars_extended, _ = _cap_bars(daily_bars_extended, BAR_LIMIT)
         entry_bars, entry_capped = _cap_bars(entry_bars, BAR_LIMIT)
         exit_bars, exit_capped = _cap_bars(exit_bars, BAR_LIMIT)
         if daily_capped:
@@ -341,11 +444,13 @@ class TradeInspectionPanel:
             bars=daily_payload_bars,
             timeframe=self._daily_timeframe,
         )
+        daily_lines = self._compute_ma_lines(daily_bars_extended, visible_bars_df=daily_bars)
         self._daily_chart.render(
             bars=daily_payload_bars,
             markers=daily_payload_markers,
             title=daily_title,
             empty_message=f"No bars found for {daily_title}",
+            lines=daily_lines,
         )
 
         entry_payload_bars = bars_from_frame(entry_bars)
@@ -377,6 +482,7 @@ class TradeInspectionPanel:
                 empty_message=f"No bars found for {exit_title}",
             )
 
+        warnings.extend(self.market_data.pop_runtime_warnings())
         self._status_label.text = " | ".join(dict.fromkeys(warnings))
 
 
@@ -468,6 +574,29 @@ def _run_parquet_root(run_config: dict[str, Any]) -> Path | None:
         return None
 
 
+def _run_split_adjustment_params(
+    run_config: dict[str, Any]
+) -> tuple[str, Path | None, bool, date | None, str]:
+    data = run_config.get("data") or {}
+    period = run_config.get("period") or {}
+
+    mode = str(data.get("split_adjustment_mode") or "none")
+    split_events_raw = data.get("split_events_file")
+    split_events_file = Path(str(split_events_raw)) if split_events_raw else None
+    split_adjust_volume = bool(data.get("split_adjust_volume", True))
+    timezone = str(data.get("timezone") or "America/New_York")
+
+    end_date = None
+    end_date_raw = period.get("end_date")
+    if end_date_raw not in (None, ""):
+        try:
+            end_date = date.fromisoformat(str(end_date_raw))
+        except Exception:
+            end_date = None
+
+    return mode, split_events_file, split_adjust_volume, end_date, timezone
+
+
 def _discover_source_roots(run_parquet_root: Path | None) -> list[Path]:
     roots: list[Path] = []
     seen: set[str] = set()
@@ -497,24 +626,21 @@ def _find_parquet_base(path: Path | None) -> Path | None:
         return None
 
     current = Path(path)
-    if current.name.startswith("timeframe=") and current.parent.name.startswith("session="):
-        current = current.parent.parent
+    if current.name in TIMEFRAME_ORDER and current.parent.name == "bars":
+        return current.parent
+    if current.name == "bars":
+        return current
 
     for candidate in [current, *current.parents]:
-        if candidate.name == "parquet":
+        if candidate.name == "bars":
             return candidate
     return None
 
 
 def _session_timeframe_from_path(path: Path) -> tuple[str | None, str | None]:
-    session = None
-    timeframe = None
-    for part in path.parts:
-        if part.startswith("session="):
-            session = part.split("=", 1)[1]
-        elif part.startswith("timeframe="):
-            timeframe = part.split("=", 1)[1]
-    return session, timeframe
+    if path.name in TIMEFRAME_ORDER:
+        return "full", path.name
+    return None, None
 
 
 def _pick_daily_timeframe(timeframes: list[str], preferred: str | None = None) -> str:

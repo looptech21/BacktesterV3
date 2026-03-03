@@ -90,6 +90,11 @@ def _to_conversion_config(config: RunConfig, tickers: list[str]) -> ConversionCo
         timezone=config.data.timezone,
         rth_start=config.data.rth_start,
         rth_end=config.data.rth_end,
+        source_layout=config.data.source_layout,
+        lean_feed_scope=config.data.lean_feed_scope,
+        split_adjustment_mode=config.data.split_adjustment_mode,
+        split_events_file=Path(config.data.split_events_file),
+        split_adjust_volume=config.data.split_adjust_volume,
     )
 
 
@@ -129,6 +134,11 @@ def _stage_convert(
                 "converted_files": report.converted_files,
                 "skipped_files": report.skipped_files,
                 "rows_written": report.rows_written,
+                "split_events_loaded": report.split_events_loaded,
+                "symbols_with_splits": report.symbols_with_splits,
+                "rows_adjusted": report.rows_adjusted,
+                "source_layout": conv_config.source_layout,
+                "lean_feed_scope": conv_config.lean_feed_scope,
             },
         )
     except Exception as exc:
