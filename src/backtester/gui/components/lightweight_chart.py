@@ -10,6 +10,36 @@ import pandas as pd
 from nicegui import ui
 
 
+def line_data_from_series(
+    ts_series: pd.Series,
+    value_series: pd.Series,
+) -> list[dict[str, Any]]:
+    """Convert timestamp + value series to Lightweight Charts line payload.
+
+    Returns [{"time": epoch_seconds, "value": float}, ...] suitable for
+    LineSeries.setData().
+    """
+    if ts_series.empty or value_series.empty:
+        return []
+
+    ts = pd.to_datetime(ts_series, errors="coerce")
+    if getattr(ts.dt, "tz", None) is None:
+        ts = ts.dt.tz_localize("UTC", ambiguous="NaT", nonexistent="NaT")
+    else:
+        ts = ts.dt.tz_convert("UTC")
+
+    values = pd.to_numeric(value_series, errors="coerce")
+
+    result: list[dict[str, Any]] = []
+    for t, v in zip(ts, values):
+        if pd.isna(t) or pd.isna(v):
+            continue
+        result.append({"time": int(t.timestamp()), "value": float(v)})
+
+    result.sort(key=lambda pt: pt["time"])
+    return result
+
+
 def bars_from_frame(frame: pd.DataFrame) -> list[dict[str, Any]]:
     """Convert normalized bar frame to Lightweight Charts payload bars."""
     if frame.empty:
@@ -213,12 +243,13 @@ class LightweightCandleChart:
         markers: list[dict[str, Any]],
         title: str,
         empty_message: str | None = None,
+        lines: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         if not bars:
             self.clear(empty_message or "No data")
             return
 
-        payload = {
+        payload: dict[str, Any] = {
             "containerId": self.container_id,
             "height": self.height,
             "title": title,
@@ -226,6 +257,8 @@ class LightweightCandleChart:
             "markers": markers,
             "emptyMessage": empty_message or "",
         }
+        if lines:
+            payload["lines"] = lines
         self._bridge_call("render", payload)
 
     def clear(self, message: str) -> None:

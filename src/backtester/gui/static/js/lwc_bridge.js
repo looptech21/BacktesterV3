@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = '20260224g';
+  const BRIDGE_VERSION = '20260225a';
   if (window.BacktesterLWC && window.BacktesterLWC.__version === BRIDGE_VERSION) {
     return;
   }
@@ -407,6 +407,7 @@
       messageElement: hud.message,
       markerLayer: hud.markerLayer,
       nativeMarkers: null,
+      lineSeries: {},
       redrawTimer: null,
     };
 
@@ -453,15 +454,67 @@
     applyNativeArrowMarkers(state);
     state.messageElement.textContent = '';
 
+    // Remove old line series
+    for (const [name, lineSeries] of Object.entries(state.lineSeries)) {
+      try {
+        state.chart.removeSeries(lineSeries);
+      } catch (_e) { /* ignore */ }
+    }
+    state.lineSeries = {};
+
+    // Add new line series from payload
+    if (payload.lines && typeof payload.lines === 'object') {
+      for (const [name, lineConfig] of Object.entries(payload.lines)) {
+        if (!lineConfig || !Array.isArray(lineConfig.data) || !lineConfig.data.length) {
+          continue;
+        }
+        const lineOpts = {
+          color: lineConfig.color || '#3b82f6',
+          lineWidth: toNumber(lineConfig.lineWidth, 2),
+          lineStyle: toNumber(lineConfig.lineStyle, 0),
+          crosshairMarkerVisible: false,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        };
+        let lineSeries = null;
+        try {
+          if (
+            typeof state.chart.addSeries === 'function' &&
+            window.LightweightCharts &&
+            window.LightweightCharts.LineSeries
+          ) {
+            lineSeries = state.chart.addSeries(window.LightweightCharts.LineSeries, lineOpts);
+          } else if (typeof state.chart.addLineSeries === 'function') {
+            lineSeries = state.chart.addLineSeries(lineOpts);
+          }
+        } catch (_e) {
+          lineSeries = null;
+        }
+        if (lineSeries) {
+          const lineData = lineConfig.data
+            .map((pt) => {
+              const time = toNumber(pt.time, null);
+              const value = toNumber(pt.value, null);
+              if (time === null || value === null) return null;
+              return { time, value };
+            })
+            .filter((pt) => pt !== null)
+            .sort((a, b) => a.time - b.time);
+          lineSeries.setData(lineData);
+          state.lineSeries[name] = lineSeries;
+        }
+      }
+    }
+
     drawMarkers(state);
     state.chart.timeScale().fitContent();
   }
 
-  function clear(containerId, message) {
-    if (containerId === undefined || containerId === null) {
+  function clear(payload) {
+    if (!payload || payload.containerId === undefined || payload.containerId === null) {
       return;
     }
-    const state = ensure(containerId, {});
+    const state = ensure(payload.containerId, {});
     if (!state) {
       return;
     }
@@ -470,7 +523,11 @@
     state.markers = [];
     state.bars = [];
     applyNativeArrowMarkers(state);
-    state.messageElement.textContent = String(message || 'No data');
+    for (const [name, lineSeries] of Object.entries(state.lineSeries)) {
+      try { state.chart.removeSeries(lineSeries); } catch (_e) { /* ignore */ }
+    }
+    state.lineSeries = {};
+    state.messageElement.textContent = String(payload.message || 'No data');
     drawMarkers(state);
   }
 

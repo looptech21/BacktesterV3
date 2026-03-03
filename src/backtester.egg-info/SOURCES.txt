@@ -12,6 +12,7 @@ src/backtester.egg-info/entry_points.txt
 src/backtester.egg-info/requires.txt
 src/backtester.egg-info/top_level.txt
 src/backtester/analysis/__init__.py
+src/backtester/analysis/comparison.py
 src/backtester/analysis/metrics.py
 src/backtester/engine/__init__.py
 src/backtester/engine/data_converter.py
@@ -33,8 +34,10 @@ src/backtester/gui/app.py
 src/backtester/gui/state.py
 src/backtester/gui/components/__init__.py
 src/backtester/gui/components/config_form.py
+src/backtester/gui/components/lightweight_chart.py
 src/backtester/gui/components/metrics_cards.py
 src/backtester/gui/components/progress.py
+src/backtester/gui/components/trade_inspection.py
 src/backtester/gui/pages/__init__.py
 src/backtester/gui/pages/compare_page.py
 src/backtester/gui/pages/configure_page.py
@@ -43,5 +46,9 @@ src/backtester/gui/pages/sweep_page.py
 src/backtester/gui/services/__init__.py
 src/backtester/gui/services/backtest_service.py
 src/backtester/gui/services/config_service.py
+src/backtester/gui/services/market_data_service.py
+src/backtester/gui/static/js/lwc_bridge.js
+src/backtester/gui/static/vendor/lightweight-charts.standalone.production.js
 src/backtester/sweep/__init__.py
 src/backtester/sweep/grid.py
+tests/test_comparison.py

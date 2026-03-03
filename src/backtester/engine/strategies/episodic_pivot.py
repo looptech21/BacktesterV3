@@ -21,15 +21,15 @@ RULE_VERSION = "episodic_pivot_v2"
 class EpisodicPivotParams:
     min_gap_pct: float = 10.0
     opening_volume_window_minutes: int = 20
-    min_opening_volume_ratio: float = 1.0
+    min_opening_volume_ratio: float = 3.0
     atr_period: int = 14
     adr_period: int = 21
     max_stop_multiple: float = 1.0
     max_stop_multiple_hard: float = 1.5
-    max_prior_runup_pct: float | None = None
+    max_prior_runup_pct: float | None = 100.0
     entry_ladder_minutes: list[int] | None = None
     stop_cap_mode: str = "hard"
-    trailing_ma_days: int = 10
+    trailing_ma_days: int = 20
     rule_version: str = ""
 
 

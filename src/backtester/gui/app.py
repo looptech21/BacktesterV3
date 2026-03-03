@@ -25,7 +25,8 @@ class _GuiContext:
 
 _CTX: _GuiContext | None = None
 _STATIC_MOUNTED = False
-_ASSET_VERSION = "20260224g"
+_ASSET_VERSION = "20260225a"
+_THEME_PREF_KEY = "theme_dark"
 
 
 def _get_context(output_root: Path) -> _GuiContext:
@@ -56,20 +57,35 @@ def _inject_theme() -> None:
         """
         <style>
             :root {
+                --bt-bg: radial-gradient(circle at 15% 15%, #1e293b 0%, #0f172a 45%, #020617 100%);
+                --bt-panel: rgba(15, 23, 42, 0.82);
+                --bt-text: #e2e8f0;
+                --bt-panel-border: rgba(148, 163, 184, 0.25);
+            }
+            body.body--light {
                 --bt-bg: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
                 --bt-panel: rgba(255, 255, 255, 0.90);
                 --bt-text: #0f172a;
+                --bt-panel-border: rgba(148, 163, 184, 0.30);
             }
             body, .nicegui-content {
                 font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", sans-serif;
-                background: var(--bt-bg);
+                background: var(--bt-bg) !important;
                 color: var(--bt-text);
+                transition: background 180ms ease, color 180ms ease;
             }
             .q-card {
                 background: var(--bt-panel);
                 backdrop-filter: blur(3px);
-                border: 1px solid rgba(148, 163, 184, 0.3);
+                border: 1px solid var(--bt-panel-border);
                 border-radius: 14px;
+            }
+            body.body--dark .text-slate-500 {
+                color: #94a3b8 !important;
+            }
+            .bt-theme-switch .q-toggle__label {
+                font-size: 0.85rem;
+                font-weight: 600;
             }
         </style>
         """,
@@ -94,6 +110,15 @@ def _top_nav(active: str) -> None:
         ("Compare", "/compare"),
         ("Results", "/results"),
     ]
+    dark_enabled = bool(app.storage.client.get(_THEME_PREF_KEY, True))
+    app.storage.client[_THEME_PREF_KEY] = dark_enabled
+    dark_mode = ui.dark_mode(value=dark_enabled)
+
+    def on_theme_change(event) -> None:
+        is_dark = bool(event.value)
+        app.storage.client[_THEME_PREF_KEY] = is_dark
+        dark_mode.value = is_dark
+
     with ui.header().classes("items-center justify-between px-4 py-2 bg-slate-900 text-white"):
         with ui.row().classes("items-center gap-3"):
             ui.label("BacktesterV3").classes("text-xl font-bold tracking-wide")
@@ -104,6 +129,9 @@ def _top_nav(active: str) -> None:
                 if route == active:
                     props = "unelevated color=primary"
                 ui.button(label, on_click=lambda dest=route: ui.navigate.to(dest)).props(props)
+            ui.switch("Dark", value=dark_enabled, on_change=on_theme_change).props("dense color=amber").classes(
+                "bt-theme-switch ml-2 text-white"
+            )
 
 
 def launch(port: int = 8050, output_root: str = "outputs", reload: bool = False) -> None:
@@ -136,6 +164,7 @@ def launch(port: int = 8050, output_root: str = "outputs", reload: bool = False)
         host="0.0.0.0",
         port=port,
         reload=reload,
+        dark=True,
         title="BacktesterV3",
         favicon="📈",
         show=False,
